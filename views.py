@@ -93,14 +93,14 @@ class CameraView():
     Uses OpenCV functions.
 
     """
-    def __init__(self, image, name, camera_matrix):
+    def __init__(self, image, name, camera_axis):
         """
         Initialize
 
         Parameters:
             image           Original image (used as background to draw on)
             name            Name to show in window title.
-            camera_matrix   3x3 Matrix of camera intrinsics
+            camera_axis     (cx, cy) tuple of camera principal axis in [px]
 
         Returns:
             CameraView() object
@@ -108,15 +108,18 @@ class CameraView():
         """
         self.image = image
         self.name = name
-        self.C = camera_matrix
+        self.height = image.shape[0]
+        self.width = image.shape[1]
+        self.cx = round(camera_axis[0])
+        self.cy = round(camera_axis[1])
 
         # draw camera crosshairs
-        cv2.line(self.image, (self.C[0][2],              0),
-                             (self.C[0][2], self.C[1][2]*2), color=(128,128,128))
-        cv2.line(self.image, (             0, self.C[1][2]),
-                             (self.C[0][2]*2, self.C[1][2]), color=(128,128,128))
+        cv2.line(self.image, (self.cx,          0),
+                             (self.cx, self.height), color=(128,128,128))
+        cv2.line(self.image, (          0, self.cy),
+                             (self.width, self.cy), color=(128,128,128))
         # Draw camera principal axis
-        cv2.drawMarker(self.image, (self.C[0][2], self.C[1][2]), color=(0, 0, 0), markerSize=7)
+        cv2.drawMarker(self.image, (self.cx, self.cy), color=(0, 0, 0), markerSize=7)
 
 
     def draw_tag(self, tag_object):
@@ -144,6 +147,7 @@ class CameraView():
         Parameters:
             bloblist    List of blobs
                         Each entry is a dict containing blob information
+                        ("cxf", cyf", "w", "h", "pixels")
 
         Returns:
             None

@@ -24,6 +24,9 @@ The JSON file is expected to contain a dict with the following items:
         "pixels"    Number of pixels in blob (int)
 
 
+Camera data is loaded from a file defined in config.yaml file
+
+
 (C) 2024, Felix Althaus
 
 """
@@ -36,6 +39,7 @@ import sys
 import tkinter as tk
 from tkinter import filedialog
 import json
+from ruamel.yaml import YAML
 import pupil_apriltags as apriltag
 import numpy as np
 import matplotlib.pyplot as plt
@@ -45,29 +49,13 @@ import views
 
 
 
-# Camera intrinsic matrix [px]
-camera_matrix_K = [[550,   0, 320],
-                   [  0, 550, 240],
-                   [  0,   0,   1]]
-
-# Physical size of the AprilTag [m]
-tag_size = 0.131
-
-# AprilTag outline at zero position (center defined at (0,0,0)
-tag0 = np.array([[-tag_size/2, tag_size/2,  tag_size/2, -tag_size/2],
-                 [ tag_size/2, tag_size/2, -tag_size/2, -tag_size/2],
-                 [          0,          0,           0,           0]])
-
-N_EXPECTED_MARKERS = 2        # number of expected markers (valid blobs)
-
-
 
 class Camera():
     """
     Simple basic monocular camera simulation.
 
     """
-    def __init__(self, camera_matrix):
+    def __init__(self, file):
         """
         Initialize camera object.
 
@@ -81,7 +69,17 @@ class Camera():
             Camera() object
 
         """
-        self.C = camera_matrix
+
+        yaml = YAML(typ='rt')
+        with open(file, "r", encoding="utf-8") as cfgfile:
+            camera_data = yaml.load(cfgfile)
+
+        self.camera_matrix = np.array(camera_data["camera_matrix"], dtype=np.float64)
+        self.dist_coeffs = np.array(camera_data["dist_coeffs"], dtype=np.float64)
+        self.fx = self.camera_matrix[0][0]
+        self.fy = self.camera_matrix[1][1]
+        self.cx = self.camera_matrix[0][2]
+        self.cy = self.camera_matrix[1][2]
 
 
     def project(self, points):
@@ -95,8 +93,45 @@ class Camera():
             Projected points in pixel coordinates
 
         """
-        points_projected = self.C @ points
+        points_projected = self.camera_matrix @ points
         return (points_projected / points_projected[2,:])
+
+
+    def undistort_blobs(self, blobs):
+        """
+        Undistort blob ("cyf","cyf") positions
+
+        Parameters:
+            blobs   List of blobs
+                        Each entry is a dict containing blob information
+
+        Returns:
+            Blob list with blob ("cxf","cyf") position undistorted
+
+        Note: Blob width and height do not get undistorted, as both are supposed
+        to be quite small, this can be ignored (and width and height are not
+        further processed anyway)
+
+        """
+        src = np.zeros((len(blobs), 1, 2))
+        dst = np.zeros((len(blobs), 1, 2))
+
+        for i in range(src.shape[0]):
+            src[i][0][0] = blobs[i]["cxf"]
+            src[i][0][1] = blobs[i]["cyf"]
+
+        # Termination criteria
+        # (COUNT, 5, 0.01) seems to be the default i.a.w. the github opencv repository
+        criteria = (cv2.TERM_CRITERIA_COUNT, 5, 0.01)
+        #
+        dst = cv2.undistortPointsIter(src, self.camera_matrix, self.dist_coeffs,
+                                      None, self.camera_matrix, criteria=criteria)
+
+        for i in range(dst.shape[0]):
+            blobs[i]["cxf"] = dst[i][0][0]
+            blobs[i]["cyf"] = dst[i][0][1]
+
+        return blobs
 
 
 
@@ -104,20 +139,17 @@ class Camera():
 if __name__ == "__main__":
 
 
-    # quick and dirty way to use  fixed list of images for testing:
-    # if '-t' argument is provided, files are loaded from 'snapshot.json' file
-    if len(sys.argv) == 2:
+    # read YML configuration file
+    yaml = YAML(typ='rt')
+    with open("config.yaml", "r", encoding="utf-8") as cfgfile:
+        config = yaml.load(cfgfile)
 
-        if sys.argv[1] == "-t":
-            # Argument '-t' provided, load list of snapshots from JSON file
-            with open("snapshots.json", "r", encoding="utf-8") as jsonfile:
-                filenames = json.load(jsonfile)
-        else:
-            print("Unknown argument '{:s}'. Exiting".format(sys.argv[1]))
-            sys.exit(-1)
 
+    if config["testing"]:
+        # if "testing" = True load test images from "test_images" list
+        filenames = config["test_images"]
     else:
-        # no argument provided, show file selection dialog for user to select
+        # if "testing" = False, show file selection dialog for user to select
         root = tk.Tk()
         root.withdraw()	# hide tkinter root window (so only the file open dialog is shown)
         filenames = filedialog.askopenfilenames(title="Select Directory",
@@ -128,19 +160,20 @@ if __name__ == "__main__":
             sys.exit(0)
 
 
-    # set up AprilTag detector
-    camera_params = [camera_matrix_K[0][0],
-                     camera_matrix_K[1][1],
-                     camera_matrix_K[0][2],
-                     camera_matrix_K[1][2]]
-
-    at_detector = apriltag.Detector(families="tag36h11")
-
-
     print()
 
 
-    cam = Camera(camera_matrix_K)     # camera simulator
+    camera = Camera(file=config["camera"]["file"])     # camera simulator
+
+    # AprilTag outline at zero position (center defined at (0,0,0)
+    tag0 = np.array([[-1/2,  1/2,  1/2, -1/2],
+                     [ 1/2,  1/2, -1/2, -1/2],
+                     [   0,    0,    0,    0]])*config["tag"]["size"]
+
+    # set up AprilTag detector
+    camera_params = [camera.fx, camera.fy, camera.cx, camera.cy]
+
+    at_detector = apriltag.Detector(families="tag36h11")
 
     scene = views.SceneView()         # 3D scene view
 
@@ -160,21 +193,22 @@ if __name__ == "__main__":
         frame_id = framedata["frame"]
         exposure_us = framedata["exposure_us"]
         blobs = framedata["blobs"]
-        blobvector = np.zeros((3,len(blobs)))
+        blobs = camera.undistort_blobs(blobs)
 
         # TODO: filter for valid blobs (i.e. marker candidates)
 
         # We need to get the correct (=expected) number of markers/blobs
-        if len(blobs) != N_EXPECTED_MARKERS:
+        if len(blobs) != config["expected_markers"]:
             raise ValueError("Unexpected number of blobs: "
-                             "expected {:d}, got {:d}.".format(len(blobs), N_EXPECTED_MARKERS))
-
+                             "expected {:d}, got {:d}.".format(len(blobs),
+                                                               config["expected_markers"]))
 
         # Sort blobs left-to-right to keep corresponding blobs in order
         # CAUTION: to establish correspondence, all LEDs are assumed
         #          to be seen from left to right!
         blobs.sort(key=lambda blob: blob["cxf"])
 
+        blobvector = np.zeros((3,len(blobs)))
         # Show blob information
         print("    Frame #{:d}: {:d} us, {:d} blob(s)".format(frame_id, exposure_us, len(blobs)))
         for i, blob in enumerate(blobs):
@@ -183,20 +217,20 @@ if __name__ == "__main__":
                                                                               blob["cyf"],
                                                                               blob["w"],
                                                                               blob["h"]))
-            # normalized blob vector
-            blobvector[:,i] = np.array([(blob["cxf"]-camera_matrix_K[0][2])/camera_matrix_K[0][0],
-                                        (blob["cyf"]-camera_matrix_K[1][2])/camera_matrix_K[1][1],
-                                                                                             1.0])
-
+            # create normalized blob vector
+            blobvector[:,i] = np.array([(blob["cxf"]-camera.cx)/camera.fx,
+                                        (blob["cyf"]-camera.cy)/camera.fy,
+                                                                      1.0])
             blobvector[:,i] = blobvector[:,i] / np.linalg.norm(blobvector[:,i])
         print()
 
-        # Read in picture and perform AprilTag detection
-        img = cv2.imread(filename)
+        # Read in picture, undistort, and perform AprilTag detection
+        img_uncorrected = cv2.imread(filename)
+        img = cv2.undistort(img_uncorrected, camera.camera_matrix, camera.dist_coeffs)
         detected_tags = at_detector.detect(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY),
                                            estimate_tag_pose=True,
                                            camera_params=camera_params,
-                                           tag_size=tag_size)
+                                           tag_size=config["tag"]["size"])
 
         # One AprilTag needs to be found (and only one)
         if len(detected_tags) == 1:
@@ -212,8 +246,8 @@ if __name__ == "__main__":
         print()
 
 
-        projview = views.ProjectedView(filename_basename, camera_matrix_K)
-        cameraview = views.CameraView(img, filename_basename, camera_matrix_K)
+        projview = views.ProjectedView(filename_basename, camera.camera_matrix)
+        cameraview = views.CameraView(img, filename_basename, (camera.cx, camera.cy))
         projview.plot_detected_tag(tag)
         projview.plot_blobs(blobs)
 
@@ -223,7 +257,7 @@ if __name__ == "__main__":
         # Re-project back center of tag using estimated pose
         tag_moved_center = (tag.pose_R @ [[0],[0],[0]]) + tag.pose_t
 
-        projview.plot_projected_tag(cam.project(tag_moved), cam.project(tag_moved_center))
+        projview.plot_projected_tag(camera.project(tag_moved), camera.project(tag_moved_center))
 
         cameraview.draw_tag(tag)
         cameraview.draw_blobs(blobs)
@@ -250,8 +284,8 @@ if __name__ == "__main__":
         scene.draw_vect(np.hstack((tvec, blob0)), "m-")
         scene.draw_vect(np.hstack((tvec, blob1)), "m-")
 
-        projview.plot_point(cam.project(blob0_moved), 'rx')
-        projview.plot_point(cam.project(blob1_moved), 'rx')
+        projview.plot_point(camera.project(blob0_moved), 'rx')
+        projview.plot_point(camera.project(blob1_moved), 'rx')
 
 
         # estimated led position in 3D (z=0)
